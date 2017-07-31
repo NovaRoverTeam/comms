@@ -1,7 +1,7 @@
 /*
   comms.cpp
 
-  Enables the use of roslibjs to communicate via service calls (in JSON) with a ROS network remotely over radio using the mavlink protocol.
+  Enables the forwarding of ROS service calls remotely over radio using the mavlink protocol.
 
   Author: Benjamin Steer    
 */
@@ -15,7 +15,6 @@
 #include <boost/thread.hpp>         // Handles multi-threading
 
 #include "simpleweb/client_ws.hpp"  // WebSocket client library
-
 #include "c_uart_interface_example/serial_port.h" // serial uart
 
 #include <mainframe/DriveCommand.h>
@@ -25,15 +24,15 @@ typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
 
 const int rb_port = 9090; // websocket port num
 
-int platform; // 0 is GCS, 1 is vehicle
+int platform; // 0 is base station, 1 is rover
 
-const int payload_len = 16;
+const int payload_len = 16; 
 
-// Declare websocket client
-WsClient client("localhost:" + to_string(rb_port));
-Serial_Port serial; // Declare serial port
+// Declare websocket client 
+WsClient client("localhost:" + to_string(rb_port)); 
+Serial_Port serial; // Declare serial port 
 
-ros::ServiceServer driveService;
+ros::ServiceServer driveService; // Declare ROS drive control service
 
 const int max_msg_size = 16; // Max # frags any msg can split into (arbitrary)
 const int max_str_size = payload_len - 3; // Max size of any msg fragment (96 - 3 byte header)
@@ -44,8 +43,6 @@ vector<vector<string> > buf(256, vector<string>(max_msg_size, ""));
 // Each int describes how many frags of a msg have been received
 int buf_cnt[256] = {0};
 uint8_t msg_id = 0;
-
-int time_cnt = 0; // Number of seconds since heartbeat
 
 void send_mav_msg(string json_str)
 /* Sends JSON message over mavlink. */
@@ -58,9 +55,6 @@ void send_mav_msg(string json_str)
   int mod = total_size % max_str_size; // Size of leftover msg
   if (mod != 0) size++; 
 
-  //cout << endl << "Splitting: " << json_str << endl;
-  //cout << "msg_id is: " << (int)msg_id << endl;
-
   for (uint8_t i = 0; i < size; i++) // Split message
   {
     int frame_size = max_str_size; // Size of string portion
@@ -69,8 +63,6 @@ void send_mav_msg(string json_str)
     // Grab portion of string for fragment
     string frag = json_str.substr(i*max_str_size, frame_size);
     const uint8_t *json_frag = reinterpret_cast<const uint8_t*>(frag.c_str()); // Convert string to uint8_t*
-
-    //cout << "msg frag: " << frag << endl;
 
     uint8_t json_uint[payload_len] = {(uint8_t) ' '};
     json_uint[0] = msg_id;
@@ -90,12 +82,8 @@ void send_mav_msg(string json_str)
 /*
     mavlink_msg_heartbeat_pack(32, 0, &json_msg, MAV_TYPE_FIXED_WING, MAV_AUTOPILOT_GENERIC, MAV_MODE_PREFLIGHT, 0, MAV_STATE_STANDBY);
 */
-    
-    //cout << "before serial write" << endl;
 
     serial.write_message(json_msg);
-
-    //cout << "after serial write" << endl;
   }  
 
   msg_id++; // Increment unique msg identifier
@@ -111,19 +99,12 @@ void forward_json(string json_str)
   auto send_stream = make_shared<WsClient::SendStream>();
   *send_stream << json_str;
 
-  cout << "before websocket client send" << endl;
-
   client.send(send_stream);
-
-  cout << "sending msg to bridge" << endl;
-  cout << "msg is: " << json_str << endl;
 }
 
 void ws_thread()
 /* Thread to run either websocket server or client. */
 {
-  //cout << "WebSocket CLIENT started!\n";
-
   client.on_message = [&client](shared_ptr<WsClient::Message> message) 
   {
     auto message_str = message->string();  // Grab incoming msg as string
@@ -155,9 +136,7 @@ void mav_thread()
   {
     mavlink_message_t msg;
 
-//cout << "before serial read" << endl;
 		bool success = serial.read_message(msg); // Read message
-//cout << "after serial read" << endl;
 
 		if(success)
     {
@@ -165,8 +144,6 @@ void mav_thread()
 			{
         case MAVLINK_MSG_ID_DATA16:
           {
-            //cout << endl << "Received a data16." << endl;
-      
             uint8_t data[max_str_size];
             mavlink_msg_data16_get_data(&msg, data);
 
@@ -178,19 +155,12 @@ void mav_thread()
             uint8_t id   = data[0];
             uint8_t num  = data[1];
             uint8_t size = data[2];   
-
-            cout << "id " << (int)id << endl;
-            cout << "num " << (int)num << endl;
-            cout << "size " << (int)size << endl;
       
             buf[id][num] = json_str; // Add string to buffer
             buf_cnt[id]++;
-            cout << "buf_cnt " << buf_cnt[id] << endl;
 
             if (buf_cnt[id] == size) // If msg complete
             {
-              cout << "last json str: " << json_str << endl;
-
               // Concat fragments
               string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
 
@@ -203,7 +173,6 @@ void mav_thread()
           break;
         case MAVLINK_MSG_ID_HEARTBEAT:
           {
-             forward_json("{\"op\":\"call_service\",\"id\":\"call_service:/CamCapture:2\",\"service\":\"/CamCapture\",\"args\":{\"data\":true}}");
           }
           break;
         default:
@@ -249,20 +218,19 @@ int main(int argc, char ** argv)
 
     serial = Serial_Port(dev, baud_rate);
     serial.start();
-
-    boost::thread ws_t{ws_thread};
-    if (platform == 1) boost::thread mav_t{mav_thread};
+    
+    if (platform == 1) 
+    {
+      boost::thread mav_t{mav_thread};
+      boost::thread ws_t{ws_thread};
+    }
     
     ros::Rate loop_rate(1); // To send heartbeat once per second  
-
-    int timeout = 3; // Num of secs til timeout with no hbeat
 
     if (platform == 0) 
     {
       driveService = n.advertiseService("DriveCommand", drive_cb);
     }
-
-    cout << "before ros loop" << endl;
 
     while (ros::ok())
     {
@@ -275,19 +243,19 @@ int main(int argc, char ** argv)
       if (platform == 0)
       {
         cout << "sending mav msg" << endl;
-        send_mav_msg("{\"op\":\"call_service\",\"id\":\"call_service:/CamCapture:2\",\"service\":\"/CamCapture\",\"args\":{\"data\":true}}");
 
-        //send_mav_msg("g");
+        send_mav_msg("{\"op\":\"call_service\",\"id\":\"call_service:/CamCapture:2\",\"service\":\"/CamCapture\",\"args\":{\"data\":true}}");
       }
       
       ros::spinOnce();
       loop_rate.sleep();
     }
 
-    cout << "after ros loop" << endl;
-
-    //if (platform == 1) mav_t.join();
-    ws_t.join(); 
+    if (platform == 1) 
+    {
+      mav_t.join(); // Join threads
+      ws_t.join(); 
+    }
     serial.stop();
   }
   else 

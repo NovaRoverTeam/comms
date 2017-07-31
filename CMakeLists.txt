@@ -33,7 +33,6 @@ find_package(Boost 1.54.0 COMPONENTS ${BOOST_COMPONENTS} REQUIRED)
 include_directories(SYSTEM ${Boost_INCLUDE_DIR})
 
 find_package(Threads REQUIRED)
-# Done
 
 include_directories(include ${catkin_INCLUDE_DIRS})
 
