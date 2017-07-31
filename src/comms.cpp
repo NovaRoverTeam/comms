@@ -26,7 +26,7 @@ const int rb_port = 9090; // websocket port num
 
 int platform; // 0 is base station, 1 is rover
 
-const int payload_len = 16; 
+const int payload_len = 96; 
 
 // Declare websocket client 
 WsClient client("localhost:" + to_string(rb_port)); 
@@ -72,7 +72,7 @@ void send_mav_msg(string json_str)
 
     mavlink_message_t json_msg;
 
-    mavlink_msg_data16_pack(32, 1,               // sysid compid
+    mavlink_msg_data96_pack(32, 1,               // sysid compid
                             &json_msg,              // msg
                             MAVLINK_TYPE_UINT8_T,   // type
                             sizeof(json_str),       // len of data
@@ -142,10 +142,10 @@ void mav_thread()
     {
       switch(msg.msgid)
 			{
-        case MAVLINK_MSG_ID_DATA16:
+        case MAVLINK_MSG_ID_DATA96:
           {
             uint8_t data[max_str_size];
-            mavlink_msg_data16_get_data(&msg, data);
+            mavlink_msg_data96_get_data(&msg, data);
 
             ostringstream convert; // Convert uint8_t[] to string
             for (int a = 3; a < payload_len; a++) convert << data[a];
@@ -176,7 +176,7 @@ void mav_thread()
           }
           break;
         default:
-          cout << "not a data16??" << endl;
+          cout << "not a data96??" << endl;
 				  break;
       }
     }  
@@ -192,6 +192,16 @@ bool drive_cb(mainframe::DriveCommand::Request  &req,
   int f_wheel_r = req.f_wheel_r;
   int b_wheel_l = req.b_wheel_l;
   int b_wheel_r = req.b_wheel_r;
+
+  string json_str = "{\"op\":\"call_service\",\"id\":\"call_service:/DriveCommand:" + \
+                    to_string(msg_id) + \
+                    "\",\"service\":\"/DriveCommand\",\"args\":{\"f_wheel_l\":" + \
+                    to_string(f_wheel_l) + ",\"f_wheel_r\":" + \
+                    to_string(f_wheel_r) + ",\"b_wheel_l\":" + \
+                    to_string(b_wheel_l) + ",\"b_wheel_r\":" + \
+                    to_string(b_wheel_r) + "}}";
+
+  send_mav_msg(json_str);
 
   return true;
 }
@@ -234,6 +244,7 @@ int main(int argc, char ** argv)
 
     while (ros::ok())
     {
+/*
       if ( serial.status != 1 ) // SERIAL_PORT_OPEN
 	    {
 		    fprintf(stderr,"ERROR: serial port not open\n");
@@ -245,17 +256,12 @@ int main(int argc, char ** argv)
         cout << "sending mav msg" << endl;
 
         send_mav_msg("{\"op\":\"call_service\",\"id\":\"call_service:/CamCapture:2\",\"service\":\"/CamCapture\",\"args\":{\"data\":true}}");
-      }
+      }*/
       
       ros::spinOnce();
       loop_rate.sleep();
     }
 
-    if (platform == 1) 
-    {
-      mav_t.join(); // Join threads
-      ws_t.join(); 
-    }
     serial.stop();
   }
   else 
