@@ -1,0 +1,61 @@
+
+# Service request format .........SetBool..........................
+def handle_request(self, req):
+  # generate a unique ID
+  request_id = "service_request:" + self.service_name + ":" + str(self.next_id())
+
+  # build a request to send to the external client
+  request_message = {
+      "op": "call_service",
+      "id": request_id,
+      "service": self.service_name,
+      "args": message_conversion.extract_values(req)
+  }
+
+  self.protocol.send(request_message)
+
+# EXAMPLE FROM CONSOLE '<string>'
+'{
+"op":"call_service",
+"id":"call_service:/CamCapture:2",
+"service":"/CamCapture",
+"args":{"data":true}
+}'
+# - order of each "dictionary" element doesn't matter
+# - the number at the end of id is merely a unique id number
+#   which is incremented upon subsequent service calls
+
+# END EXAMPLE
+
+
+# Service response format ...........SetBool.....................
+def _success(self, cid, service, fragment_size, compression, message):
+        outgoing_message = {
+            "op": "service_response",
+            "service": service,
+            "values": message,
+            "result": True
+}
+
+def _failure(self, cid, service, exc):
+outgoing_message = {
+            "op": "service_response",
+            "service": service,
+            "values": str(exc),
+            "result": False
+}
+
+# EXAMPLE FROM CONSOLE '<string>'
+'{
+"id":"call_service:/CamCapture:2",
+"values":"Service /CamCapture does not exist",
+"result":false,
+"service":"/CamCapture",
+"op":"service_response"
+}'
+# END EXAMPLE
+
+
+
+
+

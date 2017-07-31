@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package>
+  <name>comms</name>
+  <version>0.0.0</version>
+  <description>The program communicates with a ROS network via service calls to rosbridge remotely over radio using the mavlink protocol.</description>
+
+  <maintainer email="bensteer0@gmail.com">Benjamin Steer</maintainer>
+  <author email="bensteer0@gmail.com">Benjamin Steer</author>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>roscpp</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>mainframe</build_depend>
+ 
+  <run_depend>roscpp</run_depend>
+  <run_depend>rospy</run_depend>
+  <run_depend>std_msgs</run_depend>
+  <run_depend>mainframe</run_depend>
+
+  <build_depend>message_generation</build_depend>
+  <run_depend>message_runtime</run_depend>
+
+</package>

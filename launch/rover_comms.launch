@@ -1,0 +1,13 @@
+<launch>
+  <!-- Roslaunch file to run air vehicle program via serial. -->
+
+  <!-- CONFIGURATION: 
+        - device: optional cmd line arg to override default serial device path. -->
+  <arg name="device" default="/dev/ttyUSB0"/>
+
+  <!-- RUN NODES -->
+  <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch"/>
+
+  <node name="rover_comms" pkg="comms" type="comms" output="screen" args="1 $(arg device)"/>
+
+</launch>

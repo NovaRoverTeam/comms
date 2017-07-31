@@ -1,0 +1,11 @@
+<launch>
+  <!-- Roslaunch file to run base station program via serial. -->
+
+  <!-- CONFIGURATION: 
+        - device: optional cmd line arg to override default serial device path. -->
+  <arg name="device" default="/dev/ttyUSB0"/>
+
+  <!-- RUN NODES -->
+  <node name="base_comms" pkg="comms" type="comms" output="screen" args="0 $(arg device)"/>
+  
+</launch>
