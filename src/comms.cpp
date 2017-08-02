@@ -15,7 +15,7 @@
 #include <boost/thread.hpp>         // Handles multi-threading
 
 #include "simpleweb/client_ws.hpp"  // WebSocket client library
-#include "c_uart_interface_example/serial_port.h" // serial uart
+#include "c_uart_serial/serial_port.h" // serial uart
 
 #include <rover/DriveCommand.h>
 

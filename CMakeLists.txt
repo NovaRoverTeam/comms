@@ -36,7 +36,7 @@ find_package(Threads REQUIRED)
 
 include_directories(include ${catkin_INCLUDE_DIRS})
 
-add_executable(comms src/comms.cpp include/c_uart_interface_example/serial_port.cpp)
+add_executable(comms src/comms.cpp include/c_uart_serial/serial_port.cpp)
 add_dependencies(comms ${catkin_EXPORTED_TARGETS})
 target_link_libraries(comms ${catkin_LIBRARIES})
 target_link_libraries(comms ${Boost_LIBRARIES})
