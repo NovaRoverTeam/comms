@@ -201,6 +201,8 @@ bool drive_cb(rover::DriveCommand::Request  &req,
                     to_string(b_wheel_l) + ",\"b_wheel_r\":" + \
                     to_string(b_wheel_r) + "}}";
 
+  cout << json_str << endl;
+
   send_mav_msg(json_str);
 
   return true;
@@ -235,7 +237,7 @@ int main(int argc, char ** argv)
       boost::thread ws_t{ws_thread};
     }
     
-    ros::Rate loop_rate(1); // To send heartbeat once per second  
+    ros::Rate loop_rate(10); // To send heartbeat once per second  
 
     if (platform == 0) 
     {
