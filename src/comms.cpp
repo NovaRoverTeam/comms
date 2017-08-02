@@ -17,7 +17,7 @@
 #include "simpleweb/client_ws.hpp"  // WebSocket client library
 #include "c_uart_interface_example/serial_port.h" // serial uart
 
-#include <mainframe/DriveCommand.h>
+#include <rover/DriveCommand.h>
 
 using namespace std;
 typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
@@ -185,8 +185,8 @@ void mav_thread()
   }
 }
 
-bool drive_cb(mainframe::DriveCommand::Request  &req,
-         mainframe::DriveCommand::Response &res)
+bool drive_cb(rover::DriveCommand::Request  &req,
+         rover::DriveCommand::Response &res)
 {
   int f_wheel_l = req.f_wheel_l; // Grab wheel PWM values
   int f_wheel_r = req.f_wheel_r;

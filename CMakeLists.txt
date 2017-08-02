@@ -4,7 +4,7 @@ project(comms)
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   std_msgs
-  mainframe
+  rover
   message_generation
 )
 
