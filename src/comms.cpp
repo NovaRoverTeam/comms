@@ -18,6 +18,7 @@
 #include "c_uart_serial/serial_port.h" // serial uart
 
 #include <rover/DriveCommand.h>
+#include <rover/SteerCommand.h>
 
 using namespace std;
 typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
@@ -32,7 +33,8 @@ const int payload_len = 96;
 WsClient client("localhost:" + to_string(rb_port)); 
 Serial_Port serial; // Declare serial port 
 
-ros::ServiceServer driveService; // Declare ROS drive control service
+ros::ServiceServer driveService; // Declare ROS services
+ros::ServiceServer steerService; 
 
 const int max_msg_size = 16; // Max # frags any msg can split into (arbitrary)
 const int max_str_size = payload_len - 3; // Max size of any msg fragment (96 - 3 byte header)
@@ -208,6 +210,33 @@ bool drive_cb(rover::DriveCommand::Request  &req,
   return true;
 }
 
+bool steer_cb(rover::SteerCommand::Request  &req,
+         rover::SteerCommand::Response &res)
+{
+  bool start = req.start;
+  bool steer_left = req.steer_left; // Grab steering boolean 
+  bool single = req.single;
+
+  string cmd1 = "false";
+  if (steer_left) cmd1 = "true";
+
+  string cmd2 = "false";
+  if (start) cmd2 = "true";
+
+  string cmd3 = "false";
+  if (single) cmd3 = "true";
+
+  string json_str = "{\"op\":\"call_service\",\"id\":\"call_service:/SteerCommand:" + \
+                    to_string(msg_id) + \
+                    "\",\"service\":\"/SteerCommand\",\"args\":{\"steer_left\":" + cmd1 + ",\"start\":" + cmd2 + ",\"single\":" + cmd3 + "}}";
+
+  cout << json_str << endl;
+
+  send_mav_msg(json_str);
+
+  return true;
+}
+
 int main(int argc, char ** argv)
 {
   ros::init(argc, argv, "comms");
@@ -242,6 +271,7 @@ int main(int argc, char ** argv)
     if (platform == 0) 
     {
       driveService = n.advertiseService("DriveCommand", drive_cb);
+      steerService = n.advertiseService("SteerCommand", steer_cb);
     }
 
     while (ros::ok())
