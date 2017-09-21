@@ -263,7 +263,7 @@ int main(int argc, char ** argv)
       drivecmd_sub = n.subscribe("/mainframe/cmd_data", 10, cmd_data_cb);	
     }
 
-    ros::Rate loop_rate(rate);
+    ros::Rate loop_rate(10);
 
     while (ros::ok())
     {      
