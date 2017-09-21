@@ -1,7 +1,7 @@
 /*
   comms.cpp
 
-  Enables the forwarding of ROS service calls remotely over radio using the mavlink protocol.
+  Enables the forwarding of ROS messages/services remotely over radio using the mavlink protocol.
 
   Author: Benjamin Steer    
 */
@@ -17,8 +17,8 @@
 #include "simpleweb/client_ws.hpp"  // WebSocket client library
 #include "c_uart_serial/serial_port.h" // serial uart
 
-#include <rover/DriveCommand.h>
-#include <rover/SteerCommand.h>
+#include <std_msgs/Empty.h>
+#include <rover/DriveCmd.h>
 
 using namespace std;
 typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
@@ -33,8 +33,8 @@ const int payload_len = 96;
 WsClient client("localhost:" + to_string(rb_port)); 
 Serial_Port serial; // Declare serial port 
 
-ros::ServiceServer driveService; // Declare ROS services
-ros::ServiceServer steerService; 
+ros::Subscriber drivecmd_sub; // Declare ROS subscriber for drive commands
+ros::Publisher hbeat_pub;
 
 const int max_msg_size = 16; // Max # frags any msg can split into (arbitrary)
 const int max_str_size = payload_len - 3; // Max size of any msg fragment (96 - 3 byte header)
@@ -45,6 +45,17 @@ vector<vector<string> > buf(256, vector<string>(max_msg_size, ""));
 // Each int describes how many frags of a msg have been received
 int buf_cnt[256] = {0};
 uint8_t msg_id = 0;
+
+
+void send_mav_hbeat()
+/* Sends mavlink heartbeat to test connection with other comms instance. */
+{
+  mavlink_message_t hbeat_msg;
+
+  mavlink_msg_heartbeat_pack(0, 0, &hbeat_msg, MAV_TYPE_FIXED_WING, MAV_AUTOPILOT_GENERIC, MAV_MODE_PREFLIGHT, 0, MAV_STATE_STANDBY);
+
+  serial.write_message(hbeat_msg); // Send it off
+}
 
 void send_mav_msg(string json_str)
 /* Sends JSON message over mavlink. */
@@ -81,10 +92,6 @@ void send_mav_msg(string json_str)
                             json_uint               // data to pack
                            );
 
-/*
-    mavlink_msg_heartbeat_pack(32, 0, &json_msg, MAV_TYPE_FIXED_WING, MAV_AUTOPILOT_GENERIC, MAV_MODE_PREFLIGHT, 0, MAV_STATE_STANDBY);
-*/
-
     serial.write_message(json_msg);
   }  
 
@@ -92,7 +99,7 @@ void send_mav_msg(string json_str)
 }
 
 void forward_json(string json_str)
-/* Forwards a JSON string over a websocket. */
+/* Forwards a JSON string to rosbridge. */
 {
   json_str.erase(remove(json_str.begin(), json_str.end(), ' '), json_str.end()); // Remove whitespaces
 
@@ -105,7 +112,7 @@ void forward_json(string json_str)
 }
 
 void ws_thread()
-/* Thread to run either websocket server or client. */
+/* Thread to run websocket client. */
 {
   client.on_message = [&client](shared_ptr<WsClient::Message> message) 
   {
@@ -113,7 +120,7 @@ void ws_thread()
       
     cout << "Client: Msg received: \"" << message_str << "\"" << endl;
 
-    //send_mav_msg(message_str); // Send JSON via mavlink
+    send_mav_msg(message_str); // Send JSON via mavlink
   };
 
   client.on_open=[&client]() {
@@ -145,38 +152,44 @@ void mav_thread()
       switch(msg.msgid)
 			{
         case MAVLINK_MSG_ID_DATA96:
+        {
+          uint8_t data[max_str_size];
+          mavlink_msg_data96_get_data(&msg, data);
+
+          ostringstream convert; // Convert uint8_t[] to string
+          for (int a = 3; a < payload_len; a++) convert << data[a];
+          string json_str = convert.str();
+
+          // POPULATE BUFFER upon receiving mav msg
+          uint8_t id   = data[0];
+          uint8_t num  = data[1];
+          uint8_t size = data[2];   
+    
+          buf[id][num] = json_str; // Add string to buffer
+          buf_cnt[id]++;
+
+          if (buf_cnt[id] == size) // If msg complete
           {
-            uint8_t data[max_str_size];
-            mavlink_msg_data96_get_data(&msg, data);
+            // Concat fragments
+            string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
 
-            ostringstream convert; // Convert uint8_t[] to string
-            for (int a = 3; a < payload_len; a++) convert << data[a];
-            string json_str = convert.str();
+            forward_json(complete_msg); // Send string to rosbridge
 
-            // POPULATE BUFFER upon receiving mav msg
-            uint8_t id   = data[0];
-            uint8_t num  = data[1];
-            uint8_t size = data[2];   
-      
-            buf[id][num] = json_str; // Add string to buffer
-            buf_cnt[id]++;
-
-            if (buf_cnt[id] == size) // If msg complete
-            {
-              // Concat fragments
-              string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
-
-              forward_json(complete_msg); // Send string over websocket
-
-              buf_cnt[id] = 0; // Reset buffer entry
-              buf[id] = vector<string>(max_msg_size, "");
-            }
+            buf_cnt[id] = 0; // Reset buffer entry
+            buf[id] = vector<string>(max_msg_size, "");
           }
-          break;
+        } break;
+
         case MAVLINK_MSG_ID_HEARTBEAT:
-          {
+        {
+          // If rover receives heartbeat, tell underling
+          if (platform == 1)
+          { 
+            std_msgs::Empty msg;
+            hbeat_pub.publish(msg);
           }
-          break;
+        } break;
+
         default:
           cout << "not a data96??" << endl;
 				  break;
@@ -187,54 +200,17 @@ void mav_thread()
   }
 }
 
-bool drive_cb(rover::DriveCommand::Request  &req,
-         rover::DriveCommand::Response &res)
+void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
 {
-  int f_wheel_l = req.f_wheel_l; // Grab wheel PWM values
-  int f_wheel_r = req.f_wheel_r;
-  int b_wheel_l = req.b_wheel_l;
-  int b_wheel_r = req.b_wheel_r;
-
-  string json_str = "{\"op\":\"call_service\",\"id\":\"call_service:/DriveCommand:" + \
+  string json_str = "{\"op\":\"publish\",\"id\":\"publish:/mainframe/cmd_data:" + \
                     to_string(msg_id) + \
-                    "\",\"service\":\"/DriveCommand\",\"args\":{\"f_wheel_l\":" + \
-                    to_string(f_wheel_l) + ",\"f_wheel_r\":" + \
-                    to_string(f_wheel_r) + ",\"b_wheel_l\":" + \
-                    to_string(b_wheel_l) + ",\"b_wheel_r\":" + \
-                    to_string(b_wheel_r) + "}}";
+                    "\",\"topic\":\"/mainframe/cmd_data\",\"msg\":{\"acc\":" + \
+                    to_string(msg->acc) + ",\"steer\":" + \
+                    to_string(msg->steer) + "}}";
 
   cout << json_str << endl;
 
   send_mav_msg(json_str);
-
-  return true;
-}
-
-bool steer_cb(rover::SteerCommand::Request  &req,
-         rover::SteerCommand::Response &res)
-{
-  bool start = req.start;
-  bool steer_left = req.steer_left; // Grab steering boolean 
-  bool single = req.single;
-
-  string cmd1 = "false";
-  if (steer_left) cmd1 = "true";
-
-  string cmd2 = "false";
-  if (start) cmd2 = "true";
-
-  string cmd3 = "false";
-  if (single) cmd3 = "true";
-
-  string json_str = "{\"op\":\"call_service\",\"id\":\"call_service:/SteerCommand:" + \
-                    to_string(msg_id) + \
-                    "\",\"service\":\"/SteerCommand\",\"args\":{\"steer_left\":" + cmd1 + ",\"start\":" + cmd2 + ",\"single\":" + cmd3 + "}}";
-
-  cout << json_str << endl;
-
-  send_mav_msg(json_str);
-
-  return true;
 }
 
 int main(int argc, char ** argv)
@@ -259,37 +235,33 @@ int main(int argc, char ** argv)
 
     serial = Serial_Port(dev, baud_rate);
     serial.start();
+
+    int rate = 0; // Rate for main ROS loop
     
+    // If rover, set up heartbeat publisher and mav message thread
     if (platform == 1) 
     {
+      rate = 2; // Loop only used to facilitate publishing heartbeats to underling
+
+      hbeat_pub = n.advertise<std_msgs::Empty>("hbeat", 10);
+
       boost::thread mav_t{mav_thread};
       boost::thread ws_t{ws_thread};
     }
-    
-    ros::Rate loop_rate(10); // To send heartbeat once per second  
+    else
+    {      
+      rate = 4; // Loop used to get data from mainframe
 
-    if (platform == 0) 
-    {
-      driveService = n.advertiseService("DriveCommand", drive_cb);
-      steerService = n.advertiseService("SteerCommand", steer_cb);
+      ros::Subscriber drivecmd_sub = n.subscribe("/mainframe/cmd_data", 10, cmd_data_cb);	
     }
 
+    ros::Rate loop_rate(rate);
+
     while (ros::ok())
-    {
-/*
-      if ( serial.status != 1 ) // SERIAL_PORT_OPEN
-	    {
-		    fprintf(stderr,"ERROR: serial port not open\n");
-		    throw 1;
-      }
+    {      
+      // If base station, send heartbeat to rover
+      if (platform == 0) send_mav_hbeat();
 
-      if (platform == 0)
-      {
-        cout << "sending mav msg" << endl;
-
-        send_mav_msg("{\"op\":\"call_service\",\"id\":\"call_service:/CamCapture:2\",\"service\":\"/CamCapture\",\"args\":{\"data\":true}}");
-      }*/
-      
       ros::spinOnce();
       loop_rate.sleep();
     }
