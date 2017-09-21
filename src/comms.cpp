@@ -214,7 +214,7 @@ void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
                     to_string(msg->acc) + ",\"steer\":" + \
                     to_string(msg->steer) + "}}";
 
-  cout << json_str << endl;
+  ROS_INFO_STREAM(json_str << endl);
 
   send_mav_msg(json_str);
 }
@@ -223,6 +223,8 @@ int main(int argc, char ** argv)
 {
   ros::init(argc, argv, "comms");
   ros::NodeHandle n;
+
+  ros::Subscriber drivecmd_sub;
 
   string arg_err = "First cmd line arg should be 0 for base station, 1 for rover. Second should specify serial device path, e.g. /dev/ttyUSB1\n";
 
@@ -258,7 +260,7 @@ int main(int argc, char ** argv)
     {      
       rate = 4; // Loop used to get data from mainframe
 
-      ros::Subscriber drivecmd_sub = n.subscribe("/mainframe/cmd_data", 10, cmd_data_cb);	
+      drivecmd_sub = n.subscribe("/mainframe/cmd_data", 10, cmd_data_cb);	
     }
 
     ros::Rate loop_rate(rate);
