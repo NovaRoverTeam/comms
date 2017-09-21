@@ -260,7 +260,7 @@ int main(int argc, char ** argv)
     {      
       rate = 4; // Loop used to get data from mainframe
 
-      drivecmd_sub = n.subscribe("/mainframe/cmd_data", 10, cmd_data_cb);	
+      drivecmd_sub = n.subscribe("/mainframe/cmd_data", 1, cmd_data_cb);	
     }
 
     ros::Rate loop_rate(10);
