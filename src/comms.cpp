@@ -7,6 +7,8 @@
 */
 
 #include "ros/ros.h"
+#include <ros/console.h>
+
 #include <iostream>
 #include <vector>
 #include <numeric>
@@ -108,6 +110,8 @@ void forward_json(string json_str)
   auto send_stream = make_shared<WsClient::SendStream>();
   *send_stream << json_str;
 
+  ROS_INFO_STREAM("Received JSON: " << json_str << endl);
+
   client.send(send_stream);
 }
 
@@ -145,9 +149,9 @@ void mav_thread()
   {
     mavlink_message_t msg;
 
-		bool success = serial.read_message(msg); // Read message
+    bool success = serial.read_message(msg); // Read message
 
-		if(success)
+    if(success)
     {
       switch(msg.msgid)
 			{
@@ -155,6 +159,8 @@ void mav_thread()
         {
           uint8_t data[max_str_size];
           mavlink_msg_data96_get_data(&msg, data);
+
+	  ROS_INFO_STREAM("Got a cheeky data96" << endl);
 
           ostringstream convert; // Convert uint8_t[] to string
           for (int a = 3; a < payload_len; a++) convert << data[a];
