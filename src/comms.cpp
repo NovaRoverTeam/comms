@@ -251,7 +251,7 @@ int main(int argc, char ** argv)
     {
       rate = 2; // Loop only used to facilitate publishing heartbeats to underling
 
-      hbeat_pub = n.advertise<std_msgs::Empty>("hbeat", 10);
+      hbeat_pub = n.advertise<std_msgs::Empty>("hbeat", 1);
 
       boost::thread mav_t{mav_thread};
       boost::thread ws_t{ws_thread};
