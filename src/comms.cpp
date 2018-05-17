@@ -23,11 +23,12 @@
 #include "simpleweb/server_ws.hpp" // WebSocket server library
 #include "c_uart_serial/serial_port.h" // serial uart
 
-#include <std_msgs/Empty.h>
-#include <rover/DriveCmd.h>
-
 #include "json.hpp"
 
+#define LOOP_HZ 10
+
+#define ROVER 1 // Platforms
+#define BASE 0
 
 using json = nlohmann::json; // for convenience
 using namespace std;
@@ -37,18 +38,14 @@ typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
 boost::thread* ws_t_con; // Empty threads for global use
 boost::thread* mav_t_con;
 
-const int ws_port = 8091;    // websocket port num
-const int rb_port = 9090;    // websocket port num
+const int rb_port = 9090; // websocket port num
 
-shared_ptr<mlink> mav_link;
+Serial_Port serial; // Declare serial port 
 int platform; // 0 is GCS, 1 is vehicle
 
 WsServer server; // Declare websocket server and client
 WsClient client("localhost:" + to_string(rb_port));
 shared_ptr<WsServer::Connection> con; // Stores server connection
-
-Serial_Port serial; // Declare serial port 
-
 
 const int max_msg_size = 16; // Max # frags any msg can split into (arbitrary)
 const int max_str_size = 93; // Max size of any msg fragment (96 - 3 byte header)
@@ -74,12 +71,40 @@ int max_ack_list_size = 40; // Only hold this many msgs for resending
 
 int time_cnt = 0; // Number of seconds since heartbeat
 
+string PREV_STATE = "STANDBY"; // Keep track of previous STATE parameter
+bool waitingForGlen = false;
+
 
 // *****************************************************************************
 //    ROS Setup
 // *****************************************************************************
+ros::NodeHandle* n;
+ros::Rate loop_rate(LOOP_HZ);
+
 ros::Subscriber drivecmd_sub; // Declare ROS subscriber for drive commands
+ros::Subscriber hbeat_sub;
+
 ros::Publisher hbeat_pub;
+ros::Publisher gps_pub;
+ros::Publisher retrieve_pub;
+
+ros::ServiceClient calc_route_client;
+ros::ServiceServer calc_route_srv;
+ros::ServiceServer start_auto_srv;
+ros::ServiceServer set_dest_srv;
+
+#include <std_msgs/Empty.h>
+#include <rover/DriveCmd.h>
+#include <rover/RedCmd.h>
+#include <rover/Retrieve.h>
+#include <gps/Gps.h>
+#include <autopilot/calc_route.h>
+#include <autopilot/grid_size.h>
+#include <autopilot/set_dest.h>
+
+autopilot::calc_route::Response* route_res; // Store and set response
+
+#define GLEN_TIMEOUT 180 // Allowable time for Glen, in secs
 
 
 // *****************************************************************************
@@ -94,7 +119,6 @@ void send_mav_hbeat()
 
   serial.write_message(hbeat_msg); // Send it off
 }
-
 
 
 // *****************************************************************************
@@ -117,8 +141,9 @@ void send_mav_ack(uint8_t id)
 // *****************************************************************************
 bool is_priority(nlohmann::json& j)
 {
-  bool chk_sub = (j["op"] == "subscribe");
-  bool chk_srv = ((j["op"] == "call_service") || (j["op"] == "service_response"));
+  bool chk_sub = (j["op"].get<string>() == "subscribe");
+  bool chk_srv = ((j["op"].get<string>() == "call_service") 
+                        || (j["op"] == "service_response"));
 
   return (chk_sub || chk_srv);
 }
@@ -205,7 +230,7 @@ void forward_json(string json_str)
   json_str.erase(remove(json_str.begin(), json_str.end(), 0), json_str.end()); // Remove nulls
 
   // Send received JSON to recipient via WebSocket
-  if (platform == 0 && con != 0) 
+  if (platform == BASE && con != 0) 
   { // GCS
     auto send_stream = make_shared<WsServer::SendStream>();
     *send_stream << json_str;
@@ -258,6 +283,341 @@ void ws_thread()
 
 
 // *****************************************************************************
+// Subscribe to functions on the rover.
+// *****************************************************************************
+void subskrib()
+{
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "subscribe";
+  j["topic"] = "/gps/gps_data";
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+
+  // ROS info
+  j["op"] = "subscribe";
+  j["topic"] = "/retrieve";
+
+  json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+}
+
+
+//--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--
+// Start_Auto:
+//    Engages autonomous mode.
+//--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--
+bool Start_Auto(autopilot::calc_route::Request  &req,
+                autopilot::calc_route::Response &res)
+{   
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "call_service";
+  j["service"] = "/Start_Auto";
+
+  if (req.latlng == true)
+  {
+    j["args"]["latlng"] = true;
+    j["args"]["destination"]["latitude"] = req.destination.latitude;
+    j["args"]["destination"]["longitude"] = req.destination.longitude;
+  }
+  else
+  {
+    j["args"]["latlng"] = false;
+    j["args"]["bearing"] = req.bearing;
+    j["args"]["distance"] = req.distance;
+  }
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+
+  return true;
+}
+
+
+//--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--
+// Calc_Route_set_response:
+//    Sets the service response from the original call. Somehow. 
+//    Apparently. Parses the JSON.
+//--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--
+void Calc_Route_set_response (json& j)
+{
+  json j_route = j["values"]["route"];
+
+  vector<gps::Gps> gps_route;
+
+  // iterate the array
+  for (json::iterator it = j_route.begin(); it != j_route.end(); ++it) 
+  {
+    gps::Gps gps_msg; // Grab each gps coordinate on route
+
+    gps_msg.latitude  = stod((*it)["latitude"].get<string>());
+    gps_msg.longitude = stod((*it)["longitude"].get<string>());
+
+    gps_route.push_back(gps_msg);
+  }
+
+  route_res->route = gps_route; // Set the GPS route
+  waitingForGlen = false; // Stop waiting for glen and let the service go
+}
+
+
+//--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--
+// Calc_Route_server:
+//    Calculates route from Glen.
+//--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--
+bool Calc_Route_server (autopilot::calc_route::Request  &req,
+                        autopilot::calc_route::Response &res)
+{
+  route_res = &res; // Store address of service response
+
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "call_service";
+  j["service"] = "/Calc_Route";
+
+  if (req.latlng == true)
+  {
+    j["args"]["latlng"] = true;
+    j["args"]["destination"]["latitude"] = req.destination.latitude;
+    j["args"]["destination"]["longitude"] = req.destination.longitude;
+  }
+  else
+  {
+    j["args"]["latlng"] = false;
+    j["args"]["bearing"] = req.bearing;
+    j["args"]["distance"] = req.distance;
+  }
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+
+  waitingForGlen = true; // Wait until response is set
+
+  ros::WallTime start_, now_;
+  start_ = ros::WallTime::now();
+
+  while(waitingForGlen) 
+  {
+    now_  = ros::WallTime::now(); // Update current time
+
+    double elapsed_ = (now_ - start_).toSec();
+    if (elapsed_ > GLEN_TIMEOUT) waitingForGlen = false;
+
+    ros::spinOnce();
+    loop_rate.sleep();
+  }
+
+  return true;
+}
+
+
+//--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--
+// Calc_Route_client:
+//    Calculates route from Glen.
+//--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--
+void Calc_Route_client(json& j)
+{   
+  autopilot::calc_route srv; // Create service message
+
+  bool latlng = stoi(j["args"]["latlng"].get<string>()); 
+
+  if (latlng)
+  {
+    gps::Gps gps_msg;
+    gps_msg.latitude 
+      = stod(j["args"]["destination"]["latitude"].get<string>());
+    gps_msg.longitude 
+      = stod(j["args"]["destination"]["longitude"].get<string>());
+
+    srv.request.latlng = true;
+    srv.request.destination = gps_msg;
+  }
+  else
+  {
+    srv.request.latlng = false;
+    srv.request.distance 
+      = stod(j["args"]["distance"].get<string>());
+    srv.request.bearing 
+      = stod(j["args"]["bearing"].get<string>());
+  }
+
+  bool success = calc_route_client.call(srv); // Call the service
+
+  if (success)
+  {
+    ROS_INFO_STREAM("Service call to Calc_Route was a success!");
+
+    json j; // Create an empty json object
+    json j_route; // JSON object for the route of GPS coordinates
+
+    // ROS info
+    j["op"] = "service_response";
+    j["service"] = "/Calc_Route";
+    j["result"] = "true";
+
+    vector<gps::Gps> route = srv.response.route;
+    int n_wps = route.size();
+
+    // Populate the latlng route list from the Gps route list
+    for (int i=0; i<n_wps; i++)
+    {
+      gps::Gps coord = route[i];
+      json j_coord; // JSON object for a particular GPS coordinate
+
+      j_coord["latitude"] = coord.latitude;
+      j_coord["longitude"] = coord.longitude;
+
+      j_route.push_back(j_coord);
+    }
+
+    j["values"]["route"] = j_route;
+
+    string json_str = j.get<string>(); // Convert JSON object to string
+
+    ROS_INFO_STREAM("Route service JSON msg was: " << json_str);
+
+    send_mav_msg(json_str); // Send it off
+  }
+  else ROS_INFO_STREAM("Service call to Calc_Route failed!");
+}
+
+
+//--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--
+// Set_Dest:
+//    Set the destination for the interface to display.
+//--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--**--..--
+bool Set_Dest(autopilot::set_dest::Request  &req,
+              autopilot::set_dest::Response &res)
+{   
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "call_service";
+  j["service"] = "/Set_Dest";
+
+  j["args"]["latitude"] = req.destination.latitude;
+  j["args"]["longitude"] = req.destination.longitude;
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+
+  return true;
+}
+
+
+// *****************************************************************************
+// Publisher for GPS topic
+// *****************************************************************************
+void gps_pub_cb(json& j)
+{
+  gps::Gps msg;
+
+  msg.latitude  = stod(j["msg"]["latitude"].get<string>());
+  msg.longitude = stod(j["msg"]["longitude"].get<string>());
+
+  gps_pub.publish(msg);
+}
+
+
+// *****************************************************************************
+// Publisher for retrieve topic
+// *****************************************************************************
+void retrieve_pub_cb(json& j)
+{
+  rover::Retrieve msg;
+
+  msg.distance  = stod(j["msg"]["distance"].get<string>());
+  msg.bearing = stod(j["msg"]["bearing"].get<string>());
+
+  retrieve_pub.publish(msg);
+}
+
+
+// *****************************************************************************
+// Heartbeat callback
+// *****************************************************************************
+void hbeat_cb(const std_msgs::Empty::ConstPtr& msg)
+{
+  send_mav_hbeat(); // Send a heartbeat over the radio
+}
+
+
+// *****************************************************************************
+// Callback for drive command data
+// *****************************************************************************
+void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
+{
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "publish";
+  j["topic"] = "/mainframe/cmd_data";
+  //j["id"] =   j["op"].get<string>()      + ":" 
+  //          + j["topic"].get<string>() + ":" 
+  //          + to_string(msg_id);
+
+  // Message contents
+  j["msg"]["acc"] = to_string(msg->acc);
+  j["msg"]["steer"] = to_string(msg->steer);
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+
+  ROS_INFO_STREAM(json_str << endl);
+
+  send_mav_msg(json_str); // Begin mavlink sending process
+}
+
+
+// *****************************************************************************
+// Callback for Redback command data
+// *****************************************************************************
+void red_cmd_data_cb(const rover::RedCmd::ConstPtr& msg)
+{
+  json j; // Create an empty json object
+
+  // ROS info
+  j["op"] = "publish";
+  j["topic"] = "/mainframe/red_cmd_data";
+  //j["id"] =   j["op"].get<string>()      + ":" 
+  //          + j["topic"].get<string>() + ":" 
+  //          + to_string(msg_id);
+
+  // Message contents
+  j["msg"]["kill"] = to_string(msg->kill);
+  j["msg"]["drillSpd"] = to_string(msg->drillSpd);
+  j["msg"]["stepperPos"] = to_string(msg->stepperPos);
+  j["msg"]["actuatorSpeed"] = to_string(msg->actuatorSpeed);
+  j["msg"]["sensorSpeed"] = to_string(msg->sensorSpeed);
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+
+  ROS_INFO_STREAM(json_str << endl);
+
+  send_mav_msg(json_str); // Begin mavlink sending process
+}
+
+
+// *****************************************************************************
+//    Set the STATE parameter on the other end
+// *****************************************************************************
+void set_state(string STATE)
+{
+  json j; // Create an empty json object
+
+  j["op"] = "param";
+  j["STATE"] = STATE;
+
+  string json_str = j.get<string>(); // Convert JSON object to string
+  send_mav_msg(json_str); // Begin mavlink sending process
+}
+
+
+// *****************************************************************************
 // Thread to handle incoming mavlink messages.
 // *****************************************************************************
 void mav_thread()
@@ -265,11 +625,13 @@ void mav_thread()
   while (true)
   {
     mavlink_message_t msg;
-    while(mav_link->qReadIncoming(&msg)) 
+    bool success = serial.read_message(msg); // Read message
+
+    if(success)
     {
       switch(msg.msgid)
-	  {
-        case MAVLINK_MSG_ID_DATA96:
+	    {
+        case MAVLINK_MSG_ID_DATA96: // ROS MSG/SERVICE/PARAMETER COMING THROUGH
           {
             if (msg.sysid == sysid_gnd || msg.sysid == sysid_air)
             {
@@ -310,7 +672,36 @@ void mav_thread()
                   {
                     auto j = json::parse(complete_msg);
 
-                    forward_json(complete_msg); // Send string over
+                    // Check if we need to set a parameter
+                    string op = j["op"].get<string>();
+                    if (op == "param")
+                    {
+                      string STATE = j["STATE"].get<string>();
+                      n->setParam("/STATE", STATE);
+                    }
+
+                    // Check if this is for rosbridge or a custom callback/pubber
+                    if (platform == BASE)
+                    {
+                      // Look at message topics
+                      string topic = j["topic"].get<string>();
+                      if  (topic == "/gps/gps_data") gps_pub_cb(j);
+                      else if (topic == "/retrieve") retrieve_pub_cb(j);       
+
+                      // Look at services
+                      string service = j["service"].get<string>();       
+                      if (service == "/Calc_Route") Calc_Route_client(j);         
+                    }
+                    else // platform == ROVER
+                    {
+                      // Look at services
+                      string service = j["service"].get<string>(); 
+                      if (service == "/Calc_Route") Calc_Route_set_response(j); 
+             
+                      forward_json(complete_msg); 
+                    }
+
+                     // Send string over
 
                     buf_cnt[id] = 0; // Reset buffer entry
                     buf[id] = vector<string>(max_msg_size, "");
@@ -332,30 +723,24 @@ void mav_thread()
                   }  
                 }
               }
-              else ROS_INFO_STREAM("Msg fragment already received. Ignoring.");
-              
+              else ROS_INFO_STREAM("Msg fragment already received. Ignoring.");              
             }
           }
           break;
-        case MAVLINK_MSG_ID_HEARTBEAT:
+
+        case MAVLINK_MSG_ID_HEARTBEAT: // HEARTBEAT
           {
-             // If GCS receives heartbeat, tell interface
-             if (platform == 0 && con!= 0) 
-             {
-               forward_json("{\"topic\":\"/mrbridge_hbeat\",\"msg\":{\"data\":true},\"op\":\"publish\"}"); 
-               time_cnt = 0; // Reset number of heartbeats
-             }
-             else if (platform == 1)
-             { 
-               send_mav_heartbeat(); // If vehicle receives heartbeat, send one back
-             }
+             // Only ROVER gets a heartbeat
+             std_msgs::Empty msg;
+             hbeat_pub.publish(msg);
           }
           break;
-        case MAVLINK_MSG_ID_DATA16:
+
+        case MAVLINK_MSG_ID_DATA16: // MESSAGE ACKNOWLEDGEMENT
           {
             uint8_t id = mavlink_msg_data16_get_type(&msg);
 
-            //ack_mtx.lock(); // Take mutex
+            ack_mtx.lock(); // Take mutex TODO confirm this works?
 
             // Iterators to locate and delete msg from ack lists
             std::vector<uint8_t>::iterator it;
@@ -369,16 +754,16 @@ void mav_thread()
               ack_id.erase(ack_id.begin() + index);
               ack_secs.erase(ack_secs.begin() + index);
 
-              ROS_INFO_STREAM("Msg with id " << unsigned(id) << " acked."); // TODO
-
+              ROS_INFO_STREAM("Msg with id " << unsigned(id) << " acked.");
               ROS_INFO_STREAM("Resending list now contains " << ack_list.size() << " messages.");
             }
             else ROS_INFO_STREAM("No msg found in ack_list with id: " << unsigned(id));
 
-            //ack_mtx.unlock(); // Release mutex
+            ack_mtx.unlock(); // Release mutex TODO confirm this works?
 
           }
           break;
+
         default:
 				  break;
       }
@@ -389,25 +774,29 @@ void mav_thread()
 }
 
 
-void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
+// *****************************************************************************
+// Override the default ros sigint handler to shut down other threads. 
+// *****************************************************************************
+void mySigintHandler(int sig)
 {
-  string json_str = "{\"op\":\"publish\",\"id\":\"publish:/mainframe/cmd_data:" + \
-                    to_string(msg_id) + \
-                    "\",\"topic\":\"/mainframe/cmd_data\",\"msg\":{\"acc\":" + \
-                    to_string(msg->acc) + ",\"steer\":" + \
-                    to_string(msg->steer) + "}}";
+  ws_t_con->interrupt();
+  mav_t_con->interrupt();
 
-  ROS_INFO_STREAM(json_str << endl);
+  ws_t_con->join(); 
+  mav_t_con->join();
 
-  send_mav_msg(json_str);
+  // All the default sigint handler does is call shutdown()
+  ros::shutdown();
 }
 
+
+// *****************************************************************************
+// Classic main function!
+// *****************************************************************************
 int main(int argc, char ** argv)
 {
   ros::init(argc, argv, "comms");
-  ros::NodeHandle n;
-
-  ros::Subscriber drivecmd_sub;
+  n = new ros::NodeHandle();
 
   string arg_err = "First cmd line arg should be 0 for base station, 1 for rover. Second should specify serial device path, e.g. /dev/ttyUSB1\n";
 
@@ -426,32 +815,56 @@ int main(int argc, char ** argv)
 
     serial = Serial_Port(dev, baud_rate);
     serial.start();
-
-    int rate = 0; // Rate for main ROS loop
     
     // If rover, set up heartbeat publisher and mav message thread
-    if (platform == 1) 
+    if (platform == ROVER) 
     {
-      rate = 2; // Loop only used to facilitate publishing heartbeats to underling
+      hbeat_pub = n->advertise<std_msgs::Empty>("/hbeat", 1);
 
-      hbeat_pub = n.advertise<std_msgs::Empty>("hbeat", 1);
-
-      boost::thread mav_t{mav_thread};
-      boost::thread ws_t{ws_thread};
+      calc_route_srv
+        = n->advertiseService("/Calc_Route", Calc_Route_server);
     }
-    else
-    {      
-      rate = 4; // Loop used to get data from mainframe
+    else // platform == BASE
+    {
+      start_auto_srv
+        = n->advertiseService("/Start_Auto", Start_Auto);
+      set_dest_srv 
+        = n->advertiseService("/Set_Dest", Set_Dest);
+      calc_route_client 
+        = n->serviceClient<autopilot::calc_route>("/Calc_Route");
 
-      drivecmd_sub = n.subscribe("/mainframe/cmd_data", 5, cmd_data_cb);	
+      drivecmd_sub = n->subscribe("/mainframe/cmd_data", 1, cmd_data_cb);	
+      hbeat_sub = n->subscribe("/hbeat", 1, hbeat_cb);
+      gps_pub = n->advertise<gps::Gps>("/gps/gps_data", 1);	
+      retrieve_pub = n->advertise<rover::Retrieve>("/retrieve", 1);	
     }
+    
+    boost::thread mav_t{mav_thread};
+    boost::thread ws_t{ws_thread};
 
-    ros::Rate loop_rate(rate);
+    ws_t_con = &ws_t;
+    mav_t_con = &mav_t;
 
     while (ros::ok())
     {      
-      // If base station, send heartbeat to rover
-      if (platform == 0) send_mav_hbeat();
+      string STATE; n->getParam("/STATE", STATE);
+      if (PREV_STATE != STATE) set_state(STATE); // if change, set param 
+      PREV_STATE = STATE; // Update prev state
+
+      // Send acks
+      ack_mtx.lock(); // Take mutex
+
+      for (int i=0; i < ack_list.size(); i++)
+      {
+        if (ack_secs[i] == 0)
+        {
+          send_mav_msg(ack_list[i], ack_id[i]); // Send ack
+          ack_secs[i] = ack_period;
+        }
+        else ack_secs[i] -= 1;
+      }
+
+      ack_mtx.unlock(); // Release mutex
 
       ros::spinOnce();
       loop_rate.sleep();
