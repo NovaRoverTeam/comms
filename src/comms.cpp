@@ -10,45 +10,81 @@
 #include <ros/console.h>
 
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include <numeric>
 #include <unistd.h>
+#include <stdlib.h>
+#include <algorithm>
 
 #include <boost/thread.hpp>         // Handles multi-threading
 
 #include "simpleweb/client_ws.hpp"  // WebSocket client library
+#include "simpleweb/server_ws.hpp" // WebSocket server library
 #include "c_uart_serial/serial_port.h" // serial uart
 
 #include <std_msgs/Empty.h>
 #include <rover/DriveCmd.h>
 
+#include "json.hpp"
+
+
+using json = nlohmann::json; // for convenience
 using namespace std;
+typedef SimpleWeb::SocketServer<SimpleWeb::WS> WsServer;
 typedef SimpleWeb::SocketClient<SimpleWeb::WS> WsClient;
 
-const int rb_port = 9090; // websocket port num
+boost::thread* ws_t_con; // Empty threads for global use
+boost::thread* mav_t_con;
 
-int platform; // 0 is base station, 1 is rover
+const int ws_port = 8091;    // websocket port num
+const int rb_port = 9090;    // websocket port num
 
-const int payload_len = 96; 
+shared_ptr<mlink> mav_link;
+int platform; // 0 is GCS, 1 is vehicle
 
-// Declare websocket client 
-WsClient client("localhost:" + to_string(rb_port)); 
+WsServer server; // Declare websocket server and client
+WsClient client("localhost:" + to_string(rb_port));
+shared_ptr<WsServer::Connection> con; // Stores server connection
+
 Serial_Port serial; // Declare serial port 
 
-ros::Subscriber drivecmd_sub; // Declare ROS subscriber for drive commands
-ros::Publisher hbeat_pub;
 
 const int max_msg_size = 16; // Max # frags any msg can split into (arbitrary)
-const int max_str_size = payload_len - 3; // Max size of any msg fragment (96 - 3 byte header)
+const int max_str_size = 93; // Max size of any msg fragment (96 - 3 byte header)
+
+const int sysid_gnd = 14;
+const int sysid_air = 244;
+int sysid = 0; // Initialise sysid, assign on setup
 
 // Initialise message buffer
 vector<vector<string> > buf(256, vector<string>(max_msg_size, ""));
 
 // Each int describes how many frags of a msg have been received
 int buf_cnt[256] = {0};
+//bool buf_frags[256][max_msg_size] = {0};
 uint8_t msg_id = 0;
 
+vector<string> ack_list; // Vector of high priority messages
+vector<uint8_t> ack_id; // Vector of high priority msg ids
+vector<uint8_t> ack_secs; // Vector of time until resending msg
+uint8_t ack_period = 2; // Seconds to wait before resending msg
+boost::mutex ack_mtx; // Mutex for ack vectors
+int max_ack_list_size = 40; // Only hold this many msgs for resending
 
+int time_cnt = 0; // Number of seconds since heartbeat
+
+
+// *****************************************************************************
+//    ROS Setup
+// *****************************************************************************
+ros::Subscriber drivecmd_sub; // Declare ROS subscriber for drive commands
+ros::Publisher hbeat_pub;
+
+
+// *****************************************************************************
+// Sends mavlink heartbeat to test connection with other comms instance.
+// *****************************************************************************
 void send_mav_hbeat()
 /* Sends mavlink heartbeat to test connection with other comms instance. */
 {
@@ -59,11 +95,66 @@ void send_mav_hbeat()
   serial.write_message(hbeat_msg); // Send it off
 }
 
-void send_mav_msg(string json_str)
-/* Sends JSON message over mavlink. */
-{
-  json_str.erase(remove(json_str.begin(), json_str.end(), ' '), json_str.end()); // Remove whitespaces from JSON string.
 
+
+// *****************************************************************************
+// Sends mavlink acknowledgement msg to confirm message arrival.
+// *****************************************************************************
+void send_mav_ack(uint8_t id)
+{
+  mavlink_message_t ack_msg;
+
+  // Using data16 because why not, just need to send a single uint8_t
+  // Being sneaky and using its "type" field for id
+  mavlink_msg_data16_pack(sysid, 0, &ack_msg, id, 0, 0);
+
+  serial.write_message(ack_msg); // Send it off
+}
+
+
+// *****************************************************************************
+// Returns true if the ROS msg is a priority topic.
+// *****************************************************************************
+bool is_priority(nlohmann::json& j)
+{
+  bool chk_sub = (j["op"] == "subscribe");
+  bool chk_srv = ((j["op"] == "call_service") || (j["op"] == "service_response"));
+
+  return (chk_sub || chk_srv);
+}
+
+
+// *****************************************************************************
+// Sends JSON message over mavlink.
+// *****************************************************************************
+void send_mav_msg(string json_str, int force_id = -1)
+{
+  //json_str.erase(remove(json_str.begin(), json_str.end(), ' '), json_str.end()); // Remove whitespaces from JSON string.
+
+  ROS_INFO_STREAM("Sending mav msg: " << json_str << endl);
+
+  auto j = json::parse(json_str);
+
+  if (is_priority(j) && force_id < 0)
+  {
+    ack_mtx.lock(); // Take mutex
+
+    int n_acks = ack_list.size(); // Number of msgs seeking acknowledgements
+
+    if (n_acks < max_ack_list_size) // Don't hold too many msgs to resend
+    {
+      // Add json message and message id to ack list
+      ack_list.resize(n_acks+1, json_str);
+      ack_id.resize(n_acks+1, msg_id);
+      ack_secs.resize(n_acks+1, ack_period);
+
+      ROS_INFO_STREAM("Assigning msg " << unsigned(msg_id) << " for resending.");
+      ROS_INFO_STREAM("Resending list now contains " << n_acks+1 << " messages.");
+    }
+
+    ack_mtx.unlock(); // Release mutex
+  }
+  
   int total_size = json_str.length();
   uint8_t size = total_size / max_str_size; // Int div of msg size
 
@@ -79,15 +170,18 @@ void send_mav_msg(string json_str)
     string frag = json_str.substr(i*max_str_size, frame_size);
     const uint8_t *json_frag = reinterpret_cast<const uint8_t*>(frag.c_str()); // Convert string to uint8_t*
 
-    uint8_t json_uint[payload_len] = {(uint8_t) ' '};
-    json_uint[0] = msg_id;
+    uint8_t json_uint[96] = {(uint8_t) ' '};
+
+    if (force_id < 0) json_uint[0] = msg_id;
+    else              json_uint[0] = force_id;
+
     json_uint[1] = i;    // describes which fragment this is
     json_uint[2] = size;
     memcpy(&json_uint[3], json_frag, frame_size);
 
     mavlink_message_t json_msg;
 
-    mavlink_msg_data96_pack(32, 1,               // sysid compid
+    mavlink_msg_data96_pack(sysid, 1,               // sysid compid
                             &json_msg,              // msg
                             MAVLINK_TYPE_UINT8_T,   // type
                             sizeof(json_str),       // len of data
@@ -100,20 +194,40 @@ void send_mav_msg(string json_str)
   msg_id++; // Increment unique msg identifier
 }
 
+
+// *****************************************************************************
+// Forwards a JSON string over a websocket.
+// *****************************************************************************
 void forward_json(string json_str)
-/* Forwards a JSON string to rosbridge. */
 {
-  json_str.erase(remove(json_str.begin(), json_str.end(), ' '), json_str.end()); // Remove whitespaces
+  //json_str.erase(remove(json_str.begin(), json_str.end(), ' '), json_str.end()); // Remove whitespaces
 
   json_str.erase(remove(json_str.begin(), json_str.end(), 0), json_str.end()); // Remove nulls
 
-  auto send_stream = make_shared<WsClient::SendStream>();
-  *send_stream << json_str;
+  // Send received JSON to recipient via WebSocket
+  if (platform == 0 && con != 0) 
+  { // GCS
+    auto send_stream = make_shared<WsServer::SendStream>();
+    *send_stream << json_str;
 
-  ROS_INFO_STREAM("Received JSON: " << json_str << endl);
+    server.send(con, send_stream, \
+      [](const boost::system::error_code& ec) { });
 
-  client.send(send_stream);
+    ROS_INFO_STREAM("sending lil msg to interface" << endl);
+    ROS_INFO_STREAM("msg is: " << json_str << endl);
+  }
+  else                            
+  { // Vehicle   
+    auto send_stream = make_shared<WsClient::SendStream>();
+    *send_stream << json_str;
+
+    client.send(send_stream);
+
+    ROS_INFO_STREAM("sending lil msg to bridge" << endl);
+    ROS_INFO_STREAM("msg is: " << json_str << endl);
+  }
 }
+
 
 void ws_thread()
 /* Thread to run websocket client. */
@@ -142,69 +256,138 @@ void ws_thread()
   client.start();
 }
 
+
+// *****************************************************************************
+// Thread to handle incoming mavlink messages.
+// *****************************************************************************
 void mav_thread()
-/* Thread to handle incoming mavlink messages. */
 {
   while (true)
   {
     mavlink_message_t msg;
-
-    bool success = serial.read_message(msg); // Read message
-
-    if(success)
+    while(mav_link->qReadIncoming(&msg)) 
     {
       switch(msg.msgid)
-			{
+	  {
         case MAVLINK_MSG_ID_DATA96:
-        {
-          uint8_t data[max_str_size];
-          mavlink_msg_data96_get_data(&msg, data);
-
-	  ROS_INFO_STREAM("Got a cheeky data96" << endl);
-
-          ostringstream convert; // Convert uint8_t[] to string
-          for (int a = 3; a < payload_len; a++) convert << data[a];
-          string json_str = convert.str();
-
-          // POPULATE BUFFER upon receiving mav msg
-          uint8_t id   = data[0];
-          uint8_t num  = data[1];
-          uint8_t size = data[2];   
-    
-          buf[id][num] = json_str; // Add string to buffer
-          buf_cnt[id]++;
-
-          if (buf_cnt[id] == size) // If msg complete
           {
-            // Concat fragments
-            string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
+            if (msg.sysid == sysid_gnd || msg.sysid == sysid_air)
+            {
+              ROS_DEBUG_STREAM(endl << "Got a cheeky data96!" << endl);
+        
+              uint8_t data[max_str_size];
+              mavlink_msg_data96_get_data(&msg, data);
 
-            forward_json(complete_msg); // Send string to rosbridge
+              ostringstream convert; // Convert uint8_t[] to string
+              for (int a = 3; a < 96; a++) convert << data[a];
+              string json_str = convert.str();
 
-            buf_cnt[id] = 0; // Reset buffer entry
-            buf[id] = vector<string>(max_msg_size, "");
+              // POPULATE BUFFER upon receiving mav msg
+              uint8_t id   = data[0];
+              uint8_t num  = data[1];
+              uint8_t size = data[2];
+
+              ROS_DEBUG_STREAM("id " << (int)id << endl);
+              ROS_DEBUG_STREAM("num " << (int)num << endl);
+              ROS_DEBUG_STREAM("size " << (int)size << endl);
+
+              // Check if msg fragment has already been received
+              if (buf[id][num] != json_str)
+              {
+                ROS_DEBUG_STREAM("New msg fragment found. Adding to collection :)");
+  
+                // Only increment counter if buffer fragment is 100% empty
+                if (buf[id][num] == "") buf_cnt[id]++;
+
+                buf[id][num] = json_str; // Add string to buffer                
+
+                if (buf_cnt[id] == size) // If msg complete, assemble and forward
+                {
+                  // Concat fragments
+                  string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
+
+                  try
+                  {
+                    auto j = json::parse(complete_msg);
+
+                    forward_json(complete_msg); // Send string over
+
+                    buf_cnt[id] = 0; // Reset buffer entry
+                    buf[id] = vector<string>(max_msg_size, "");
+
+                    ROS_DEBUG_STREAM("Accum buf entry reset for msg " << unsigned(id));                                
+
+                    // Check if msg is priority topic
+                    if (is_priority(j))
+                    {
+                      send_mav_ack(id); // Send ack in response to msg arrival
+                    }
+                  }
+                  catch (nlohmann::detail::parse_error e)
+                  {
+                    ROS_INFO_STREAM("JSON parsing exception thrown. Clearing buffer entry.");
+
+                    buf_cnt[id] = 0; // Reset buffer entry
+                    buf[id] = vector<string>(max_msg_size, "");
+                  }  
+                }
+              }
+              else ROS_INFO_STREAM("Msg fragment already received. Ignoring.");
+              
+            }
           }
-        } break;
-
+          break;
         case MAVLINK_MSG_ID_HEARTBEAT:
-        {
-          // If rover receives heartbeat, tell underling
-          if (platform == 1)
-          { 
-            std_msgs::Empty msg;
-            hbeat_pub.publish(msg);
+          {
+             // If GCS receives heartbeat, tell interface
+             if (platform == 0 && con!= 0) 
+             {
+               forward_json("{\"topic\":\"/mrbridge_hbeat\",\"msg\":{\"data\":true},\"op\":\"publish\"}"); 
+               time_cnt = 0; // Reset number of heartbeats
+             }
+             else if (platform == 1)
+             { 
+               send_mav_heartbeat(); // If vehicle receives heartbeat, send one back
+             }
           }
-        } break;
+          break;
+        case MAVLINK_MSG_ID_DATA16:
+          {
+            uint8_t id = mavlink_msg_data16_get_type(&msg);
 
+            //ack_mtx.lock(); // Take mutex
+
+            // Iterators to locate and delete msg from ack lists
+            std::vector<uint8_t>::iterator it;
+            it = find(ack_id.begin(), ack_id.end(), id);
+            int index = it - ack_id.begin(); // Index of element to be removed          
+
+            if (it != ack_id.end())
+            {
+              // Clear ack from lists so we don't resend this msg any more.
+              ack_list.erase(ack_list.begin() + index);
+              ack_id.erase(ack_id.begin() + index);
+              ack_secs.erase(ack_secs.begin() + index);
+
+              ROS_INFO_STREAM("Msg with id " << unsigned(id) << " acked."); // TODO
+
+              ROS_INFO_STREAM("Resending list now contains " << ack_list.size() << " messages.");
+            }
+            else ROS_INFO_STREAM("No msg found in ack_list with id: " << unsigned(id));
+
+            //ack_mtx.unlock(); // Release mutex
+
+          }
+          break;
         default:
-          cout << "not a data96??" << endl;
 				  break;
       }
     }  
 
-    //boost::this_thread::sleep(boost::posix_time::milliseconds(50));
+    boost::this_thread::sleep(boost::posix_time::milliseconds(10));
   }
 }
+
 
 void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
 {
