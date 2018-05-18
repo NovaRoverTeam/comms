@@ -631,6 +631,7 @@ void mav_thread()
 
     if(success)
     {
+      ROS_INFO_STREAM("Received mav msg");
       switch(msg.msgid)
 	    {
         case MAVLINK_MSG_ID_DATA96: // ROS MSG/SERVICE/PARAMETER COMING THROUGH
@@ -826,6 +827,9 @@ int main(int argc, char ** argv)
 
       calc_route_srv
         = n->advertiseService("/Calc_Route", Calc_Route_server);
+
+      boost::thread ws_t{ws_thread};
+      ws_t_con = &ws_t;
     }
     else // platform == BASE
     {
@@ -842,10 +846,7 @@ int main(int argc, char ** argv)
       retrieve_pub = n->advertise<rover::Retrieve>("/retrieve", 1);	
     }
     
-    boost::thread mav_t{mav_thread};
-    boost::thread ws_t{ws_thread};
-
-    ws_t_con = &ws_t;
+    boost::thread mav_t{mav_thread};    
     mav_t_con = &mav_t;
 
     while (ros::ok())
