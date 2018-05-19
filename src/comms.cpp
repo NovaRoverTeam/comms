@@ -26,7 +26,7 @@
 
 #include "json.hpp"
 
-#define LOOP_HZ 10
+#define LOOP_HZ 50
 
 #define ROVER 1 // Platforms
 #define BASE 0
@@ -82,6 +82,7 @@ bool waitingForGlen = false;
 ros::NodeHandle* n;
 
 ros::Subscriber drivecmd_sub; // Declare ROS subscriber for drive commands
+ros::Subscriber armcmd_sub; // Declare ROS subscriber for arm commands
 ros::Subscriber hbeat_sub;
 
 ros::Publisher hbeat_pub;
@@ -242,28 +243,51 @@ void send_mav_msg(string json_str, int force_id = -1)
 // *****************************************************************************
 void subskrib()
 {
-  json j; // Create an empty json object
-
-  // ROS info
-  j["op"] = "subscribe";
+  json j; 
+  
+  // SUBSCRIBE to gps
+  j["op"] = "subscribe"; // ROS info
   j["topic"] = "/gps/gps_data";
   j["type"] = "gps/Gps";
-  j["queue_length"] = 0;
   j["id"] =   j["op"].dump()      + ":" 
             + j["topic"].dump() + ":" 
             + to_string(msg_id);
 
   string json_str = j.dump(); // Convert JSON object to string
   send_mav_msg(json_str); // Send it off
+ 
+  // SUBSCRIBE to retrieve 
+  j["op"] = "subscribe"; // ROS info
+  j["topic"] = "/retrieve";
+  j["type"] = "rover/Retrieve";
+  j["id"] =   j["op"].dump()      + ":" 
+            + j["topic"].dump() + ":" 
+            + to_string(msg_id);
 
-  //ROS_INFO_STREAM("now to sub to retrieve");
+  json_str = j.dump(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
 
-  // ROS info
-  //j["op"] = "subscribe";
-  //j["topic"] = "/retrieve";
+  // ADVERTISE for cmd_data
+  j["op"] = "advertise"; // ROS info
+  j["topic"] = "/cmd_data";
+  j["type"] = "rover/DriveCmd";
+  j["id"] =   j["op"].dump()      + ":" 
+            + j["topic"].dump() + ":" 
+            + to_string(msg_id);
 
-  //json_str = j.dump(); // Convert JSON object to string
-  //send_mav_msg(json_str); // Send it off 
+  json_str = j.dump(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
+
+  // ADVERTISE for red_cmd_data
+  j["op"] = "advertise"; // ROS info
+  j["topic"] = "/red_cmd_data";
+  j["type"] = "rover/RedCmd";
+  j["id"] =   j["op"].dump()      + ":" 
+            + j["topic"].dump() + ":" 
+            + to_string(msg_id);
+
+  json_str = j.dump(); // Convert JSON object to string
+  send_mav_msg(json_str); // Send it off
 }
 
 
@@ -584,14 +608,14 @@ void cmd_data_cb(const rover::DriveCmd::ConstPtr& msg)
 
   // ROS info
   j["op"] = "publish";
-  j["topic"] = "/mainframe/cmd_data";
+  j["topic"] = "/cmd_data";
   //j["id"] =   j["op"].dump()      + ":" 
   //          + j["topic"].dump() + ":" 
   //          + to_string(msg_id);
 
   // Message contents
-  j["msg"]["acc"] = to_string(msg->acc);
-  j["msg"]["steer"] = to_string(msg->steer);
+  j["msg"]["acc"] = msg->acc;
+  j["msg"]["steer"] = msg->steer;
 
   string json_str = j.dump(); // Convert JSON object to string
 
@@ -610,7 +634,7 @@ void red_cmd_data_cb(const rover::RedCmd::ConstPtr& msg)
 
   // ROS info
   j["op"] = "publish";
-  j["topic"] = "/mainframe/red_cmd_data";
+  j["topic"] = "/red_cmd_data";
   //j["id"] =   j["op"].dump()      + ":" 
   //          + j["topic"].dump() + ":" 
   //          + to_string(msg_id);
@@ -858,6 +882,8 @@ int main(int argc, char ** argv)
     }
     else // platform == BASE
     {
+      subskrib();	
+
       start_auto_srv
         = n->advertiseService("/Start_Auto", Start_Auto);
       set_dest_srv 
@@ -865,12 +891,11 @@ int main(int argc, char ** argv)
       calc_route_client 
         = n->serviceClient<autopilot::calc_route>("/Calc_Route");
 
-      drivecmd_sub = n->subscribe("/mainframe/cmd_data", 1, cmd_data_cb);	
+      //drivecmd_sub = n->subscribe("/cmd_data", 1, cmd_data_cb);	
+      armcmd_sub = n->subscribe("/red_cmd_data", 1, red_cmd_data_cb);	
       hbeat_sub = n->subscribe("/hbeat", 1, hbeat_cb);
       gps_pub = n->advertise<gps::Gps>("/gps/gps_data", 1);	
       retrieve_pub = n->advertise<rover::Retrieve>("/retrieve", 1);
-
-      subskrib();	
     }
     
     boost::thread mav_t{mav_thread};    
