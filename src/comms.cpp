@@ -179,6 +179,8 @@ void send_mav_msg(string json_str, int force_id = -1)
 
     //ack_mtx.unlock(); // Release mutex
   }
+
+  ROS_INFO_STREAM("splitting now lolol");
   
   int total_size = json_str.length();
   uint8_t size = total_size / max_str_size; // Int div of msg size
@@ -241,14 +243,14 @@ void subskrib()
   string json_str = j.dump(); // Convert JSON object to string
   send_mav_msg(json_str); // Send it off
 
-  ROS_INFO_STREAM("now to sub to retrieve");
+  //ROS_INFO_STREAM("now to sub to retrieve");
 
   // ROS info
-  j["op"] = "subscribe";
-  j["topic"] = "/retrieve";
+  //j["op"] = "subscribe";
+  //j["topic"] = "/retrieve";
 
-  json_str = j.dump(); // Convert JSON object to string
-  send_mav_msg(json_str); // Send it off 
+  //json_str = j.dump(); // Convert JSON object to string
+  //send_mav_msg(json_str); // Send it off 
 }
 
 
@@ -645,6 +647,7 @@ void mav_thread()
 	    {
         case MAVLINK_MSG_ID_DATA96: // ROS MSG/SERVICE/PARAMETER COMING THROUGH
           {
+            ROS_INFO_STREAM("it a 96");
             if (msg.sysid == sysid_gnd || msg.sysid == sysid_air)
             {
               ROS_INFO_STREAM(endl << "Got a cheeky data96!" << endl);
