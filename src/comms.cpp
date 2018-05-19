@@ -647,7 +647,7 @@ void mav_thread()
           {
             if (msg.sysid == sysid_gnd || msg.sysid == sysid_air)
             {
-              ROS_DEBUG_STREAM(endl << "Got a cheeky data96!" << endl);
+              ROS_INFO_STREAM(endl << "Got a cheeky data96!" << endl);
         
               uint8_t data[max_str_size];
               mavlink_msg_data96_get_data(&msg, data);
@@ -668,7 +668,7 @@ void mav_thread()
               // Check if msg fragment has already been received
               if (buf[id][num] != json_str)
               {
-                ROS_DEBUG_STREAM("New msg fragment found. Adding to collection :)");
+                ROS_INFO_STREAM("New msg fragment found. Adding to collection :)");
   
                 // Only increment counter if buffer fragment is 100% empty
                 if (buf[id][num] == "") buf_cnt[id]++;
