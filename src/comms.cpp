@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <string>
 
 #include <boost/thread.hpp>         // Handles multi-threading
 
@@ -146,6 +147,18 @@ bool is_priority(nlohmann::json& j)
                         || (j["op"] == "service_response"));
 
   return (chk_sub || chk_srv);
+}
+
+
+// *****************************************************************************
+// Removes double quotes from a string
+// *****************************************************************************
+string rem_quotes(string s)
+{
+  string ret_s = s;
+  ret_s.erase(remove(ret_s.begin(), ret_s.end(), '"'), ret_s.end()); 
+
+  return ret_s;
 }
 
 
@@ -530,6 +543,8 @@ void gps_pub_cb(json& j)
 {
   gps::Gps msg;
 
+  ROS_INFO("we made it to gps yall");
+
   msg.latitude  = stod(j["msg"]["latitude"].dump());
   msg.longitude = stod(j["msg"]["longitude"].dump());
 
@@ -687,29 +702,30 @@ void mav_thread()
                     auto j = json::parse(complete_msg);
 
                     // Check if we need to set a parameter
-                    string op = j["op"].dump();
+                    string op = rem_quotes(j["op"].dump());
                     if (op == "param")
                     {
-                      string STATE = j["STATE"].dump();
+                      string STATE = rem_quotes(j["STATE"].dump());
                       n->setParam("/STATE", STATE);
                     }
 
                     // Check if this is for rosbridge or a custom callback/pubber
-                    if (platform == BASE)
+                    else if (platform == BASE)                    
                     {
                       // Look at message topics
-                      string topic = j["topic"].dump();
+                      string topic = rem_quotes(j["topic"].dump());                   
+ 
                       if  (topic == "/gps/gps_data") gps_pub_cb(j);
                       else if (topic == "/retrieve") retrieve_pub_cb(j);       
 
                       // Look at services
-                      string service = j["service"].dump();       
+                      string service = rem_quotes(j["service"].dump());      
                       if (service == "/Calc_Route") Calc_Route_client(j);         
                     }
                     else // platform == ROVER
                     {
                       // Look at services
-                      string service = j["service"].dump(); 
+                      string service = rem_quotes(j["service"].dump()); 
                       if (service == "/Calc_Route") Calc_Route_set_response(j); 
                       else forward_json(complete_msg); 
                     }
