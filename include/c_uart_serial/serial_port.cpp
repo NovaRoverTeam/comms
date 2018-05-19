@@ -53,6 +53,7 @@
 // ------------------------------------------------------------------------------
 
 #include "serial_port.h"
+#include <iostream>
 
 
 // ----------------------------------------------------------------------------------
@@ -202,6 +203,7 @@ write_message(const mavlink_message_t &message)
 
 	// Write buffer to serial port, locks port while writing
 	int bytesWritten = _write_port(buf,len);
+
 
 	return bytesWritten;
 }
@@ -527,9 +529,8 @@ int
 Serial_Port::
 _write_port(char *buf, unsigned len)
 {
-
 	// Lock
-	pthread_mutex_lock(&lock);
+	//pthread_mutex_lock(&lock);
 
 	// Write packet via serial link
 	const int bytesWritten = static_cast<int>(write(fd, buf, len));
@@ -538,8 +539,7 @@ _write_port(char *buf, unsigned len)
 	tcdrain(fd);
 
 	// Unlock
-	pthread_mutex_unlock(&lock);
-
+	//pthread_mutex_unlock(&lock);
 
 	return bytesWritten;
 }

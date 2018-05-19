@@ -112,6 +112,7 @@ autopilot::calc_route::Response* route_res; // Store and set response
 void send_mav_hbeat()
 /* Sends mavlink heartbeat to test connection with other comms instance. */
 {
+  ROS_INFO("Sending mav hbeat");
   mavlink_message_t hbeat_msg;
 
   mavlink_msg_heartbeat_pack(0, 0, &hbeat_msg, MAV_TYPE_FIXED_WING, MAV_AUTOPILOT_GENERIC, MAV_MODE_PREFLIGHT, 0, MAV_STATE_STANDBY);
@@ -161,7 +162,7 @@ void send_mav_msg(string json_str, int force_id = -1)
 
   if (is_priority(j) && force_id < 0)
   {
-    ack_mtx.lock(); // Take mutex
+    //ack_mtx.lock(); // Take mutex
 
     int n_acks = ack_list.size(); // Number of msgs seeking acknowledgements
 
@@ -176,7 +177,7 @@ void send_mav_msg(string json_str, int force_id = -1)
       ROS_INFO_STREAM("Resending list now contains " << n_acks+1 << " messages.");
     }
 
-    ack_mtx.unlock(); // Release mutex
+    //ack_mtx.unlock(); // Release mutex
   }
   
   int total_size = json_str.length();
@@ -212,7 +213,9 @@ void send_mav_msg(string json_str, int force_id = -1)
                             json_uint               // data to pack
                            );
 
+    ROS_INFO_STREAM("Off da mav goes whee");
     serial.write_message(json_msg);
+    ROS_INFO_STREAM("it went off yall");
   }  
 
   msg_id++; // Increment unique msg identifier
@@ -229,9 +232,16 @@ void subskrib()
   // ROS info
   j["op"] = "subscribe";
   j["topic"] = "/gps/gps_data";
+  j["type"] = "gps/Gps";
+  j["queue_length"] = 0;
+  j["id"] =   j["op"].dump()      + ":" 
+            + j["topic"].dump() + ":" 
+            + to_string(msg_id);
 
   string json_str = j.dump(); // Convert JSON object to string
   send_mav_msg(json_str); // Send it off
+
+  ROS_INFO_STREAM("now to sub to retrieve");
 
   // ROS info
   j["op"] = "subscribe";
@@ -291,7 +301,6 @@ void ws_thread()
   client.on_open=[&client]() {
     cout << "Client: Opened connection" << endl;
 
-    subskrib();
   };
 
   client.on_error = [&client](const boost::system::error_code& ec) 
@@ -671,6 +680,8 @@ void mav_thread()
                   // Concat fragments
                   string complete_msg = accumulate(buf[id].begin(), buf[id].end(), string(""));
 
+                  ROS_INFO_STREAM("defragmented, msg is: " << complete_msg);
+
                   try
                   {
                     auto j = json::parse(complete_msg);
@@ -700,8 +711,7 @@ void mav_thread()
                       // Look at services
                       string service = j["service"].dump(); 
                       if (service == "/Calc_Route") Calc_Route_set_response(j); 
-             
-                      forward_json(complete_msg); 
+                      else forward_json(complete_msg); 
                     }
 
                      // Send string over
@@ -743,7 +753,7 @@ void mav_thread()
           {
             uint8_t id = mavlink_msg_data16_get_type(&msg);
 
-            ack_mtx.lock(); // Take mutex TODO confirm this works?
+            //ack_mtx.lock(); // Take mutex TODO confirm this works?
 
             // Iterators to locate and delete msg from ack lists
             std::vector<uint8_t>::iterator it;
@@ -762,7 +772,7 @@ void mav_thread()
             }
             else ROS_INFO_STREAM("No msg found in ack_list with id: " << unsigned(id));
 
-            ack_mtx.unlock(); // Release mutex TODO confirm this works?
+            //ack_mtx.unlock(); // Release mutex TODO confirm this works?
 
           }
           break;
@@ -843,7 +853,9 @@ int main(int argc, char ** argv)
       drivecmd_sub = n->subscribe("/mainframe/cmd_data", 1, cmd_data_cb);	
       hbeat_sub = n->subscribe("/hbeat", 1, hbeat_cb);
       gps_pub = n->advertise<gps::Gps>("/gps/gps_data", 1);	
-      retrieve_pub = n->advertise<rover::Retrieve>("/retrieve", 1);	
+      retrieve_pub = n->advertise<rover::Retrieve>("/retrieve", 1);
+
+      subskrib();	
     }
     
     boost::thread mav_t{mav_thread};    
@@ -856,7 +868,7 @@ int main(int argc, char ** argv)
       PREV_STATE = STATE; // Update prev state
 
       // Send acks
-      ack_mtx.lock(); // Take mutex
+      //ack_mtx.lock(); // Take mutex
 
       for (int i=0; i < ack_list.size(); i++)
       {
@@ -868,7 +880,7 @@ int main(int argc, char ** argv)
         else ack_secs[i] -= 1;
       }
 
-      ack_mtx.unlock(); // Release mutex
+      //ack_mtx.unlock(); // Release mutex
 
       ros::spinOnce();
       loop_rate.sleep();
