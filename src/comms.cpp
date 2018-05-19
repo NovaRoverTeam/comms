@@ -647,9 +647,6 @@ void mav_thread()
 	    {
         case MAVLINK_MSG_ID_DATA96: // ROS MSG/SERVICE/PARAMETER COMING THROUGH
           {
-            ROS_INFO_STREAM("it a 96");
-            if (msg.sysid == sysid_gnd || msg.sysid == sysid_air)
-            {
               ROS_INFO_STREAM(endl << "Got a cheeky data96!" << endl);
         
               uint8_t data[max_str_size];
@@ -740,7 +737,6 @@ void mav_thread()
                 }
               }
               else ROS_INFO_STREAM("Msg fragment already received. Ignoring.");              
-            }
           }
           break;
 
